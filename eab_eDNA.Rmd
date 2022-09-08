@@ -1,0 +1,227 @@
+# Read in and format data
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(brms)
+library(ggplot2)
+
+# read in data
+eab <- read.table("data/EAB_data_whole.txt", header = T)
+gdd <- read.table("data/EAB_GDD_vs_Date.txt", header = T)
+dayb <- read.table("data/EAB_covariate_matrix_day_B.txt", header = T)
+eab2 <- read.table("data/EAB_data_with_qPCR_hits.txt", header = T)
+
+# format data for GAM fitting
+eab.gamdat <- eab2 %>%
+  pivot_longer(2:27) %>%
+  left_join(gdd, by = c("name"="Day")) %>%
+  filter(is.na(value)==F) %>%
+  rename(tree = Tree, gdd = GDD, 
+         numpos = value) %>%
+  mutate(dir = stringr::str_sub(name, -1, -1),
+         pos = as.numeric(ifelse(numpos>0,1,0)),
+         pos2 = as.numeric(ifelse(numpos>1,1,0))) %>%
+  select(-Date.Direction, -name)
+```
+# Explore the data
+```{r}
+# count number of visits per tree
+visitcount <- apply(eab[,2:27], 1, function(x) sum(is.na(x)==F))
+hist(visitcount)
+summary(visitcount)
+
+# how many trees have at least 1 hit? 20
+  # 2 trees (Tree2 and Tree8) have 0 hits, but only 2 sample days
+```
+# Run GAMs for detections vs. growing degree days
+https://fromthebottomoftheheap.net/2018/04/21/fitting-gams-with-brms/
+```{r}
+# run a model with only a random intercept for "tree"
+tree <- brm(bf(pos ~ (1|tree)),
+          data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
+          iter = 4000, warmup = 2000, 
+          control = list(adapt_delta = 0.99),
+          save_pars = save_pars(all = TRUE))
+saveRDS(tree, "output/tree.gam.rds") # save the output
+stancode(tree) # peek at the underlying stan code
+
+# run the same model but now with a smoothed effect of GDD
+gdd.tree <- brm(bf(pos ~ s(gdd) + (1|tree)),
+          data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
+          iter = 4000, warmup = 2000, 
+          control = list(adapt_delta = 0.99))
+saveRDS(gdd.tree, "output/gdd.tree.gam.rds") # save it
+stancode(gdd.tree) # peek at the underlying stan code
+
+# run the same model but now with a categorical effect of "direction"
+gdd.tree.dir <- brm(bf(pos ~ s(gdd) + (1|tree) + dir),
+          data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
+          iter = 4000, warmup = 2000, 
+          control = list(adapt_delta = 0.99))
+saveRDS(gdd.tree.dir, "output/gdd.tree.dir.gam.rds") # save it
+stancode(gdd.tree.dir) # peek at the underlying stan code
+
+# read in the saved models (so we don't have to fit them each time)
+tree <- readRDS("output/tree.gam.rds")
+gdd.tree <- readRDS("output/gdd.tree.gam.rds")
+gdd.tree.dir <- readRDS("output/gdd.tree.dir.gam.rds")
+
+# examine the output summary for each
+tree
+gdd.tree
+gdd.tree.dir
+
+# compare the 3 models based on LOOIC
+tree <- add_criterion(tree, criterion = "loo",
+                          moment_match = TRUE)
+gdd.tree <- add_criterion(gdd.tree, criterion = "loo",
+                          moment_match = TRUE)
+gdd.tree.dir <- add_criterion(gdd.tree.dir, criterion = "loo",
+                          moment_match = TRUE)
+
+loo_compare(tree, gdd.tree, gdd.tree.dir, 
+            criterion = "loo") %>% 
+  print(simplify = F)
+
+# elpd_diff gdd.tree vs. gdd.tree.dir was -0.9 (SE = 0.3)
+#   vs. tree it was -13.4 (SE = 5.7)
+```
+# Plot detection probability vs. GDD smooth
+```{r}
+# load the model fit
+gdd.tree <- readRDS("output/gdd.tree.gam.rds")
+
+# make quick plots to inspect
+gdd.tree.smooth <- conditional_smooths(gdd.tree, prob = c(0.95))
+gdd.tree.smooth.e <- conditional_effects(gdd.tree, prob = c(0.95))
+plot(gdd.tree.smooth)
+plot(gdd.tree.smooth.e)
+
+# get predictions vs. GDD with 95 and 80% credible intervals
+gdd.tree.smooth.95 <- conditional_effects(gdd.tree, 
+                                          prob = c(0.95))$gdd %>%
+  select(gdd, p = estimate__, q2.5 = lower__, q97.5 = upper__)
+
+gdd.tree.smooth.80 <- conditional_effects(gdd.tree, 
+                                          prob = c(0.80))$gdd %>%
+  select(gdd, p = estimate__, q10 = lower__, q90 = upper__)
+
+# get observed proportions on each sampling date
+obs <- eab.gamdat %>%
+  group_by(as.character(gdd)) %>%
+  summarise(obs_p = mean(pos),
+            n = length(pos),
+            .groups = "drop") %>%
+  rename(gdd = 1) %>%
+  mutate(gdd = as.numeric(gdd)) %>%
+  arrange(gdd) %>%
+  mutate(se = sqrt((obs_p * (1-obs_p))/n))
+
+# make the plot
+(
+gdd.plot <-
+gdd.tree.smooth.95 %>%
+  left_join(gdd.tree.smooth.80, 
+            by = c("gdd", "p")) %>%
+  ggplot() +
+  geom_ribbon(aes(x = gdd, ymin = q10, ymax = q90),
+              alpha = 0.7,
+              fill = "darkgray") +
+  geom_ribbon(aes(x = gdd, ymin = q2.5, ymax = q97.5),
+              alpha = 0.7,
+              fill = "darkgray") +
+  geom_line(aes(x = gdd, y = p),
+            color = "black") +
+  geom_point(aes(x = gdd, y = obs_p),
+             data = obs, size = 3) +
+  labs(y = "Probability of detection",
+       x = "Growing degree days") +
+  scale_y_continuous(limits = c(0,1)) +
+  scale_x_continuous(breaks = c(500, 1000, 1500, 
+                                2000, 2500, 3000, 3500)) +
+  theme_bw() +
+  theme(text = element_text(size = 14))
+)
+
+# save the plot
+ggsave("figures/p_vs_gdd_gam.jpg", 
+       width = 6, height = 5,
+       dpi = 400)  
+```
+# Calculate number of samples required to achieve 95% detection by GDD
+```{r}
+# load the model fit
+gdd.tree <- readRDS("output/gdd.tree.gam.rds")
+
+# get posterior distributions for p at various predicted GDD values
+preds <- posterior_epred(gdd.tree,
+                re.form = NA,
+                newdata = data.frame(gdd = seq(min(eab.gamdat$gdd),
+                                               max(eab.gamdat$gdd),
+                                               length.out = 100),
+                                     tree = NA))
+
+# calculate the number of days required to reach 95% certainty
+    # for each of the 8000 iterations in the posterior
+    # the formula is derived from the cumulative probabilty formula:
+        # 1 - (1-p)^n where n is the number of samples
+numsamps_list <- lapply(1:8000, 
+                        function(x){
+                          log(20) / (-log(1 - preds[x, 1:100]))
+                          })
+
+# summarize the resulting 8000 iterated calculations into quantiles
+    # i.e., point estimate (50%) and credible intervals of 80% and 95%
+numsamps <- do.call(rbind, numsamps_list) %>%
+  apply(., 2, FUN = function(x) quantile(x, c(0.025, 0.1, 
+                                              .5, 0.9, 0.975)))
+
+# collapse that into a data.frame and add GDD back in
+numsamps_df <- data.frame(gdd = seq(min(eab.gamdat$gdd),
+                                               max(eab.gamdat$gdd),
+                                               length.out = 100)) %>%
+  cbind(t(numsamps)) %>%
+  rename(q2.5 = 2, q10 = 3, days = 4, q90 = 5, q97.5 = 6)
+
+# remove large unnecessary object
+rm(numsamps_list)
+
+# make the plot
+(
+numsamps.plot <-
+numsamps_df %>%
+  ggplot() +
+  geom_ribbon(aes(x = gdd, ymin = q10, ymax = q90),
+              alpha = 0.7,
+              fill = "darkgray") +
+  geom_ribbon(aes(x = gdd, ymin = q2.5, ymax = q97.5),
+              alpha = 0.7,
+              fill = "darkgray") +
+  geom_line(aes(x = gdd, y = days),
+            color = "black") +
+  labs(y = "Samples required to \ndetect with 95% certainty",
+       x = "Growing degree days") +
+  scale_y_log10(breaks = c(2,5,10,25, 50,100,250, 500, 1000)) +
+  scale_x_continuous(breaks = c(500, 1000, 1500, 
+                                2000, 2500, 3000, 3500)) +
+  theme_bw() +
+  theme(text = element_text(size = 14))
+)
+
+# save the plot
+ggsave("figures/samples95pct_vs_gdd_gam.jpg", 
+       width = 6, height = 5,
+       dpi = 400) 
+```
+# Make a composite figure of the 2 plots above
+```{r}
+library(patchwork)
+gdd.plot2 <- gdd.plot + labs(x = "")
+gdd.plot2 / numsamps.plot
+
+ggsave("figures/both_vs_gdd_gam2.jpg", 
+       width = 6, height = 8,
+       dpi = 400) 
+
+```
