@@ -50,42 +50,59 @@ stancode(tree) # peek at the underlying stan code
 gdd.tree <- brm(bf(pos ~ s(gdd) + (1|tree)),
           data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
           iter = 4000, warmup = 2000, 
-          control = list(adapt_delta = 0.99))
+          control = list(adapt_delta = 0.99),
+          save_pars = save_pars(all = TRUE))
 saveRDS(gdd.tree, "output/gdd.tree.gam.rds") # save it
 stancode(gdd.tree) # peek at the underlying stan code
 
 # run the same model but now with a categorical effect of "direction"
 gdd.tree.dir <- brm(bf(pos ~ s(gdd) + (1|tree) + dir),
           data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
-          iter = 4000, warmup = 2000, 
+          iter = 4000, warmup = 2000, save_pars = save_pars(all = TRUE),
           control = list(adapt_delta = 0.99))
 saveRDS(gdd.tree.dir, "output/gdd.tree.dir.gam.rds") # save it
 stancode(gdd.tree.dir) # peek at the underlying stan code
 
+# run the same model but with a only categorical effect of "direction"
+tree.dir <- brm(bf(pos ~ (1|tree) + dir),
+          data = eab.gamdat, family = bernoulli(), cores = 3, seed = 17,
+          iter = 4000, warmup = 2000,
+          control = list(adapt_delta = 0.99),
+          save_pars = save_pars(all = TRUE))
+saveRDS(tree.dir, "output/tree.dir.gam.rds") # save it
+stancode(tree.dir) # peek at the underlying stan code
+```
 # read in the saved models (so we don't have to fit them each time)
+And examine the output
+```{r}
 tree <- readRDS("output/tree.gam.rds")
 gdd.tree <- readRDS("output/gdd.tree.gam.rds")
 gdd.tree.dir <- readRDS("output/gdd.tree.dir.gam.rds")
+tree.dir <- readRDS("output/tree.dir.gam.rds")
 
 # examine the output summary for each
 tree
 gdd.tree
 gdd.tree.dir
+tree.dir
 
 # compare the 3 models based on LOOIC
 tree <- add_criterion(tree, criterion = "loo",
                           moment_match = TRUE)
 gdd.tree <- add_criterion(gdd.tree, criterion = "loo",
-                          moment_match = TRUE)
+                          moment_match = TRUE, reloo = TRUE)
 gdd.tree.dir <- add_criterion(gdd.tree.dir, criterion = "loo",
                           moment_match = TRUE)
+tree.dir <- add_criterion(tree.dir, criterion = "loo",
+                          moment_match = TRUE)
 
-loo_compare(tree, gdd.tree, gdd.tree.dir, 
+loo_compare(tree, gdd.tree, gdd.tree.dir, tree.dir,
             criterion = "loo") %>% 
   print(simplify = F)
 
-# elpd_diff gdd.tree vs. gdd.tree.dir was -0.9 (SE = 0.3)
-#   vs. tree it was -13.4 (SE = 5.7)
+# elpd_diff gdd.tree vs. gdd.tree.dir was -0.8 (SE = 0.3)
+# vs. tree.dir it was -14.4 (SE = 5.8)
+#   vs. tree it was -13.2 (SE = 5.8)
 ```
 # Plot detection probability vs. GDD smooth
 ```{r}
@@ -135,9 +152,11 @@ gdd.tree.smooth.95 %>%
             color = "black") +
   geom_point(aes(x = gdd, y = obs_p),
              data = obs, size = 3) +
+  # geom_text(aes(x = gdd, y = obs_p - 0.05, label = n),
+  #           data = obs, size = 3) +
   labs(y = "Probability of detection",
        x = "Growing degree days") +
-  scale_y_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(-0.1,1)) +
   scale_x_continuous(breaks = c(500, 1000, 1500, 
                                 2000, 2500, 3000, 3500)) +
   theme_bw() +
@@ -225,11 +244,38 @@ ggsave("figures/both_vs_gdd_gam2.jpg",
        dpi = 400) 
 
 ```
+# Create Fig. - phenology of conventional detections 
+```{r}
+library(readxl)
+cp <- read_xlsx("data/EAB_Phenology_FINAL.xlsx") %>%
+  rename(p = 7, GDD = 9)
+
+cp %>%
+  filter(State != "WV") %>%
+ggplot() +
+  geom_point(aes(x = 32+GDD*9/5, y = p, color = State)) +
+  geom_smooth(aes(x = 32+GDD*9/5, y = p),
+              method = "gam", se = F,
+              color = "black") +
+  scale_color_manual(values = wesanderson::wes_palette("Zissou1")) +
+  scale_x_continuous(limits = c(366,3584)) +
+  scale_y_continuous(limits = c(0,0.4)) +
+  labs(x = "Growing degree days", 
+       y = "Proportion of total \nEAB trap catch") +
+  theme_bw() +
+  theme(text = element_text(size = 12))
+
+ggsave("figures/conventional_trap_phenology.png", 
+       height = 4, width = 6, dpi = 400)
+
+```
 
 
-
-# Code below here is a parallel analysis treating "singleton" PCR hits as zeros
-
+###########
+###############
+Code below is a parallel analysis treating "singleton" PCR hits as zeros
+###############
+###########
 
 
 # SUPPLEMENTAL: Run GAMs for detections vs. growing degree days
